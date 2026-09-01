@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Trophy Measurement API",
     description="API для цифрового измерения охотничьих трофеев по Методу №6",
-    version="0.2.0"
+    version="0.3.0"
 )
 
 app.add_middleware(
@@ -66,25 +66,42 @@ class MeasurementRequest(BaseModel):
     width_right: Point3D
 
 class MeasurementService:
-    ALGORITHM_VERSION = "1.0"
+    """Сервис для расчетов по Методу №6"""
+    
+    ALGORITHM_VERSION = "2.0"
     WIDTH_TOLERANCE_DEGREES = 5.0
     
     @staticmethod
-    def calculate_scale_factor(point1: Point3D, point2: Point3D, actual_distance_mm: float) -> float:
+    def calculate_distance(point1: Point3D, point2: Point3D) -> float:
+        """Расчет расстояния между двумя точками"""
         p1 = np.array([point1.x, point1.y, point1.z])
         p2 = np.array([point2.x, point2.y, point2.z])
-        model_distance = np.linalg.norm(p2 - p1)
+        return float(np.linalg.norm(p2 - p1))
+    
+    @staticmethod
+    def calculate_scale_factor(point1: Point3D, point2: Point3D, actual_distance_mm: float) -> float:
+        """Расчет масштабного коэффициента"""
+        model_distance = MeasurementService.calculate_distance(point1, point2)
         if model_distance == 0:
             raise ValueError("Точки калибровки совпадают")
-        return float(actual_distance_mm / model_distance)
+        
+        scale_factor = actual_distance_mm / model_distance
+        logger.info(f"Калибровка: модель={model_distance:.4f}, реально={actual_distance_mm}мм, scale={scale_factor:.4f}")
+        return scale_factor
     
     @staticmethod
     def calculate_measurements(
-        axis_start: Point3D, axis_end: Point3D,
-        length_start: Point3D, length_end: Point3D,
-        width_left: Point3D, width_right: Point3D,
+        axis_start: Point3D,
+        axis_end: Point3D,
+        length_start: Point3D,
+        length_end: Point3D,
+        width_left: Point3D,
+        width_right: Point3D,
         scale_factor: float
     ) -> Dict[str, Any]:
+        """Расчет длины и ширины согласно Методу №6"""
+        
+        # Преобразование в numpy массивы
         axis_start_np = np.array([axis_start.x, axis_start.y, axis_start.z])
         axis_end_np = np.array([axis_end.x, axis_end.y, axis_end.z])
         length_start_np = np.array([length_start.x, length_start.y, length_start.z])
@@ -92,33 +109,53 @@ class MeasurementService:
         width_left_np = np.array([width_left.x, width_left.y, width_left.z])
         width_right_np = np.array([width_right.x, width_right.y, width_right.z])
         
+        # 1. Построение оси
         axis_vector = axis_end_np - axis_start_np
         axis_length = np.linalg.norm(axis_vector)
+        
         if axis_length == 0:
             raise ValueError("Точки оси совпадают")
-        axis_direction = axis_vector / axis_length
         
+        axis_direction = axis_vector / axis_length
+        logger.info(f"Ось: длина={axis_length:.4f}, направление={axis_direction}")
+        
+        # 2. Расчет длины (проекция на ось)
+        # Проецируем точки на ось
         length_start_proj = np.dot(length_start_np - axis_start_np, axis_direction)
         length_end_proj = np.dot(length_end_np - axis_start_np, axis_direction)
-        raw_length = abs(length_end_proj - length_start_proj)
         
+        # Длина = абсолютная разница проекций
+        raw_length = abs(length_end_proj - length_start_proj)
+        logger.info(f"Длина: проекции [{length_start_proj:.4f}, {length_end_proj:.4f}], raw={raw_length:.4f}")
+        
+        # 3. Расчет ширины
         width_vector = width_right_np - width_left_np
         raw_width = np.linalg.norm(width_vector)
+        logger.info(f"Ширина: vector={width_vector}, raw={raw_width:.4f}")
         
+        # 4. Расчет угла ширины относительно оси
         width_angle_degrees = 0.0
         if raw_width > 0:
             width_direction = width_vector / raw_width
             angle_cos = np.dot(width_direction, axis_direction)
-            angle_rad = math.acos(np.clip(angle_cos, -1.0, 1.0))
+            angle_cos = np.clip(angle_cos, -1.0, 1.0)
+            angle_rad = math.acos(angle_cos)
             width_angle_degrees = math.degrees(angle_rad)
         
+        # Отклонение от перпендикуляра (90 градусов)
         perpendicular_deviation = abs(90.0 - width_angle_degrees)
+        logger.info(f"Угол ширины: {width_angle_degrees:.2f}°, отклонение: {perpendicular_deviation:.2f}°")
         
+        # 5. Применение масштаба
         final_length_mm = raw_length * scale_factor
         final_width_mm = raw_width * scale_factor
         final_total_mm = final_length_mm + final_width_mm
         
+        logger.info(f"Результат: длина={final_length_mm:.2f}мм, ширина={final_width_mm:.2f}мм, итого={final_total_mm:.2f}мм")
+        
         return {
+            "raw_length": float(raw_length),
+            "raw_width": float(raw_width),
             "raw_length_mm": float(raw_length),
             "raw_width_mm": float(raw_width),
             "final_length_mm": float(final_length_mm),
@@ -134,57 +171,63 @@ class MeasurementService:
                 "x": float(axis_direction[0]),
                 "y": float(axis_direction[1]),
                 "z": float(axis_direction[2])
-            }
+            },
+            "axis_length": float(axis_length),
+            "scale_factor": float(scale_factor)
         }
 
 def parse_stl_info(file_path: Path) -> Dict[str, Any]:
+    """Извлечение информации из STL файла"""
     info = {
         "format": "unknown",
         "vertices_count": 0,
         "triangles_count": 0,
         "bounding_box": None,
+        "dimensions": None,
         "file_size": file_path.stat().st_size
     }
     
     try:
         with open(file_path, "rb") as f:
-            header = f.read(80)
-            f.seek(0)
-            
-            try:
-                f.seek(80)
-                triangle_count_bytes = f.read(4)
-                if len(triangle_count_bytes) == 4:
-                    triangle_count = int.from_bytes(triangle_count_bytes, "little")
-                    expected_size = 84 + triangle_count * 50
+            # Проверка на бинарный формат
+            f.seek(80)
+            triangle_count_bytes = f.read(4)
+            if len(triangle_count_bytes) == 4:
+                triangle_count = int.from_bytes(triangle_count_bytes, "little")
+                expected_size = 84 + triangle_count * 50
+                
+                if file_path.stat().st_size == expected_size:
+                    info["format"] = "binary"
+                    info["triangles_count"] = triangle_count
+                    info["vertices_count"] = triangle_count * 3
                     
-                    if file_path.stat().st_size == expected_size:
-                        info["format"] = "binary"
-                        info["triangles_count"] = triangle_count
-                        info["vertices_count"] = triangle_count * 3
-                        
-                        f.seek(84)
-                        vertices = []
-                        for _ in range(triangle_count):
-                            f.read(12)
-                            for _ in range(3):
-                                vertex = np.frombuffer(f.read(12), dtype=np.float32)
-                                vertices.append(vertex)
-                            f.read(2)
-                        
-                        if vertices:
-                            vertices_array = np.array(vertices)
-                            info["bounding_box"] = {
-                                "min": {"x": float(vertices_array[:, 0].min()), 
-                                       "y": float(vertices_array[:, 1].min()), 
-                                       "z": float(vertices_array[:, 2].min())},
-                                "max": {"x": float(vertices_array[:, 0].max()), 
-                                       "y": float(vertices_array[:, 1].max()), 
-                                       "z": float(vertices_array[:, 2].max())}
-                            }
-            except:
-                pass
+                    # Читаем все вершины
+                    f.seek(84)
+                    vertices = []
+                    for _ in range(triangle_count):
+                        f.read(12)  # Нормаль
+                        for _ in range(3):
+                            vertex = np.frombuffer(f.read(12), dtype=np.float32)
+                            vertices.append(vertex)
+                        f.read(2)  # Атрибут
+                    
+                    if vertices:
+                        vertices_array = np.array(vertices)
+                        info["bounding_box"] = {
+                            "min": {"x": float(vertices_array[:, 0].min()), 
+                                   "y": float(vertices_array[:, 1].min()), 
+                                   "z": float(vertices_array[:, 2].min())},
+                            "max": {"x": float(vertices_array[:, 0].max()), 
+                                   "y": float(vertices_array[:, 1].max()), 
+                                   "z": float(vertices_array[:, 2].max())}
+                        }
+                        info["dimensions"] = {
+                            "x": float(vertices_array[:, 0].max() - vertices_array[:, 0].min()),
+                            "y": float(vertices_array[:, 1].max() - vertices_array[:, 1].min()),
+                            "z": float(vertices_array[:, 2].max() - vertices_array[:, 2].min())
+                        }
             
+            # ASCII формат
             if info["format"] == "unknown":
                 f.seek(0)
                 content = f.read(1000).decode("ascii", errors="ignore")
@@ -205,7 +248,7 @@ def parse_stl_info(file_path: Path) -> Dict[str, Any]:
 async def root():
     return {
         "service": "Trophy Measurement API",
-        "version": "0.2.0",
+        "version": "0.3.0",
         "method": "Метод №6 - Измерение черепов плотоядных",
         "status": "running"
     }
@@ -279,6 +322,7 @@ async def upload_model(trophy_id: str, file: UploadFile = File(...)):
         "vertices_count": stl_info["vertices_count"],
         "triangles_count": stl_info["triangles_count"],
         "bounding_box": stl_info["bounding_box"],
+        "dimensions": stl_info["dimensions"],
         "uploaded_at": datetime.now().isoformat(),
         "status": "uploaded"
     }
@@ -286,7 +330,7 @@ async def upload_model(trophy_id: str, file: UploadFile = File(...)):
     TROPHIES[trophy_id]["models"].append(model_info)
     TROPHIES[trophy_id]["status"] = "MODEL_UPLOADED"
     
-    logger.info(f"Модель загружена для трофея {trophy_id}: {file.filename}")
+    logger.info(f"Модель загружена: {file.filename}, размеры: {stl_info['dimensions']}")
     return model_info
 
 @app.get("/api/trophies/{trophy_id}/models")
@@ -328,11 +372,21 @@ async def delete_model(trophy_id: str, filename: str):
 async def calculate_measurement(data: MeasurementRequest):
     try:
         service = MeasurementService()
+        
+        # Логирование входных данных
+        logger.info(f"=== Новый расчет ===")
+        logger.info(f"Калибровка: P1({data.calibration.point1.x}, {data.calibration.point1.y}, {data.calibration.point1.z}), "
+                   f"P2({data.calibration.point2.x}, {data.calibration.point2.y}, {data.calibration.point2.z}), "
+                   f"дистанция={data.calibration.actual_distance_mm}мм")
+        
+        # Расчет масштаба
         scale_factor = service.calculate_scale_factor(
             data.calibration.point1,
             data.calibration.point2,
             data.calibration.actual_distance_mm
         )
+        
+        # Расчет измерений
         result = service.calculate_measurements(
             data.axis.axis_start,
             data.axis.axis_end,
@@ -342,15 +396,20 @@ async def calculate_measurement(data: MeasurementRequest):
             data.width_right,
             scale_factor
         )
+        
+        # Добавление метаданных
         measurement_id = str(uuid.uuid4())
         result["measurement_id"] = measurement_id
-        result["scale_factor"] = scale_factor
         result["algorithm_version"] = service.ALGORITHM_VERSION
         result["timestamp"] = datetime.now().isoformat()
+        
+        # Сохранение
         MEASUREMENTS[measurement_id] = result
-        logger.info(f"Выполнено измерение: {measurement_id}")
+        
         return result
+        
     except ValueError as e:
+        logger.error(f"Ошибка валидации: {str(e)}")
         raise HTTPException(400, str(e))
     except Exception as e:
         logger.error(f"Ошибка расчета: {str(e)}")
@@ -369,4 +428,3 @@ async def get_measurement(measurement_id: str):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-

@@ -1,577 +1,436 @@
-#!/bin/bash
-# fix_app.sh - Исправление App.tsx для работы с IP 93.77.162.57
+# Обновленный main.py с правильной математикой
+cat > backend/app/main.py << 'EOF'
+from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+from typing import Optional, List, Dict, Any
+import uuid
+from datetime import datetime
+import os
+import json
+import numpy as np
+import math
+import logging
+from pathlib import Path
 
-# Создаем правильный App.tsx
-cat > frontend/src/App.tsx << 'EOF'
-import React, { useState, useEffect, useRef, useCallback } from "react";
-import {
-  Container, Typography, Button, TextField, Card, CardContent,
-  Grid, AppBar, Toolbar, Box, Alert, List, ListItem, ListItemText,
-  Divider, Paper, Chip, IconButton, LinearProgress, Stack, Tabs, Tab
-} from "@mui/material";
-import DeleteIcon from "@mui/icons-material/Delete";
-import CloudUploadIcon from "@mui/icons-material/CloudUpload";
-import ThreeDRotationIcon from "@mui/icons-material/ThreeDRotation";
-import StraightenIcon from "@mui/icons-material/Straighten";
-import axios from "axios";
-import ModelViewer, { MeasurementPoint, PointType } from "./components/ModelViewer";
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-// Используем IP-адрес сервера
-const API_URL = "http://93.77.162.57:8000";
+app = FastAPI(
+    title="Trophy Measurement API",
+    description="API для цифрового измерения охотничьих трофеев по Методу №6",
+    version="0.3.0"
+)
 
-// Или можно автоматически определить хост
-// const API_URL = window.location.protocol + "//" + window.location.hostname + ":8000";
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-interface Trophy {
-  id: string;
-  animal_species: string;
-  hunt_date: string;
-  hunt_location: string;
-  owner_name: string;
-  status: string;
-  models: ModelInfo[];
-}
+TROPHIES = {}
+MEASUREMENTS = {}
+UPLOAD_DIR = Path("uploads")
+UPLOAD_DIR.mkdir(exist_ok=True)
 
-interface ModelInfo {
-  id: string;
-  filename: string;
-  file_size: number;
-  format: string;
-  vertices_count: number;
-  triangles_count: number;
-  bounding_box: any;
-  uploaded_at: string;
-  status: string;
-}
+MAX_FILE_SIZE = 500 * 1024 * 1024
 
-interface MeasurementResult {
-  measurement_id: string;
-  final_length_cm: number;
-  final_width_cm: number;
-  final_total_cm: number;
-  width_angle_degrees: number;
-  perpendicular_deviation_degrees: number;
-  is_width_perpendicular: boolean;
-  scale_factor: number;
-}
+class Point3D(BaseModel):
+    x: float
+    y: float
+    z: float
 
-function App() {
-  const [trophies, setTrophies] = useState<Trophy[]>([]);
-  const [selectedTrophy, setSelectedTrophy] = useState<Trophy | null>(null);
-  const [measurementResult, setMeasurementResult] = useState<MeasurementResult | null>(null);
-  const [error, setError] = useState<string>("");
-  const [success, setSuccess] = useState<string>("");
-  const [uploading, setUploading] = useState<boolean>(false);
-  const [uploadProgress, setUploadProgress] = useState<number>(0);
-  const [activeTab, setActiveTab] = useState(0);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  
-  const [measurementPoints, setMeasurementPoints] = useState<MeasurementPoint[]>([]);
-  const [activePointType, setActivePointType] = useState<PointType | null>(null);
-  const [currentModelUrl, setCurrentModelUrl] = useState<string>("");
-  
-  const [animalSpecies, setAnimalSpecies] = useState<string>("");
-  const [huntDate, setHuntDate] = useState<string>("");
-  const [huntLocation, setHuntLocation] = useState<string>("");
-  const [ownerName, setOwnerName] = useState<string>("");
-  const [calibrationDistance, setCalibrationDistance] = useState<number>(100);
-  
-  useEffect(() => {
-    console.log("API URL:", API_URL);
-    loadTrophies();
-  }, []);
-  
-  const loadTrophies = async () => {
-    try {
-      const response = await axios.get(`${API_URL}/api/trophies`);
-      setTrophies(response.data);
-    } catch (error) {
-      console.error("Ошибка загрузки трофеев:", error);
-      if (axios.isAxiosError(error)) {
-        if (error.code === "ERR_NETWORK") {
-          setError(`Не удается подключиться к серверу ${API_URL}. Проверьте, что backend запущен.`);
-        } else if (error.response?.status === 404) {
-          setError("API endpoint не найден");
-        }
-      }
-    }
-  };
-  
-  const createTrophy = async () => {
-    try {
-      setError("");
-      setSuccess("");
-      
-      if (!animalSpecies || !huntDate || !huntLocation || !ownerName) {
-        setError("Заполните все поля");
-        return;
-      }
-      
-      const response = await axios.post(`${API_URL}/api/trophies`, {
-        animal_species: animalSpecies,
-        hunt_date: huntDate,
-        hunt_location: huntLocation,
-        owner_name: ownerName
-      });
-      
-      setSuccess(`Трофей создан: ${response.data.animal_species}`);
-      setAnimalSpecies("");
-      setHuntDate("");
-      setHuntLocation("");
-      setOwnerName("");
-      loadTrophies();
-    } catch (error) {
-      setError("Ошибка при создании трофея");
-      console.error(error);
-    }
-  };
-  
-  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
+class TrophyCreate(BaseModel):
+    animal_species: str
+    hunt_date: str
+    hunt_location: str
+    owner_name: str
+    additional_data: Optional[Dict[str, Any]] = {}
+
+class CalibrationData(BaseModel):
+    point1: Point3D
+    point2: Point3D
+    actual_distance_mm: float
+
+class AxisData(BaseModel):
+    axis_start: Point3D
+    axis_end: Point3D
+
+class MeasurementRequest(BaseModel):
+    calibration: CalibrationData
+    axis: AxisData
+    length_start: Point3D
+    length_end: Point3D
+    width_left: Point3D
+    width_right: Point3D
+
+class MeasurementService:
+    """Сервис для расчетов по Методу №6"""
     
-    if (!file) return;
+    ALGORITHM_VERSION = "2.0"
+    WIDTH_TOLERANCE_DEGREES = 5.0
     
-    if (!selectedTrophy) {
-      setError("Сначала выберите трофей для загрузки модели");
-      return;
-    }
+    @staticmethod
+    def calculate_distance(point1: Point3D, point2: Point3D) -> float:
+        """Расчет расстояния между двумя точками"""
+        p1 = np.array([point1.x, point1.y, point1.z])
+        p2 = np.array([point2.x, point2.y, point2.z])
+        return float(np.linalg.norm(p2 - p1))
     
-    if (!file.name.toLowerCase().endsWith(".stl")) {
-      setError("Поддерживается только формат STL");
-      return;
-    }
+    @staticmethod
+    def calculate_scale_factor(point1: Point3D, point2: Point3D, actual_distance_mm: float) -> float:
+        """Расчет масштабного коэффициента"""
+        model_distance = MeasurementService.calculate_distance(point1, point2)
+        if model_distance == 0:
+            raise ValueError("Точки калибровки совпадают")
+        
+        scale_factor = actual_distance_mm / model_distance
+        logger.info(f"Калибровка: модель={model_distance:.4f}, реально={actual_distance_mm}мм, scale={scale_factor:.4f}")
+        return scale_factor
     
-    if (file.size > 500 * 1024 * 1024) {
-      setError("Файл слишком большой. Максимальный размер: 500 MB");
-      return;
-    }
-    
-    setUploading(true);
-    setUploadProgress(0);
-    setError("");
-    setSuccess("");
-    
-    const formData = new FormData();
-    formData.append("file", file);
-    
-    try {
-      const response = await axios.post(
-        `${API_URL}/api/trophies/${selectedTrophy.id}/upload-model`,
-        formData,
-        {
-          headers: { "Content-Type": "multipart/form-data" },
-          onUploadProgress: (progressEvent) => {
-            const percentCompleted = Math.round(
-              (progressEvent.loaded * 100) / (progressEvent.total || 1)
-            );
-            setUploadProgress(percentCompleted);
-          }
-        }
-      );
-      
-      setSuccess(`Модель "${response.data.filename}" загружена успешно`);
-      loadTrophies();
-      setCurrentModelUrl(`${API_URL}/api/models/${selectedTrophy.id}/${response.data.filename}`);
-      setActiveTab(1);
-      
-    } catch (error) {
-      setError("Ошибка при загрузке файла");
-      console.error(error);
-    } finally {
-      setUploading(false);
-      setUploadProgress(0);
-      if (fileInputRef.current) {
-        fileInputRef.current.value = "";
-      }
-    }
-  };
-  
-  const handleDeleteModel = async (trophyId: string, filename: string) => {
-    try {
-      await axios.delete(`${API_URL}/api/models/${trophyId}/${filename}`);
-      setSuccess(`Модель "${filename}" удалена`);
-      loadTrophies();
-      setCurrentModelUrl("");
-      setMeasurementPoints([]);
-    } catch (error) {
-      setError("Ошибка при удалении модели");
-      console.error(error);
-    }
-  };
-  
-  const handlePointAdd = useCallback((point: MeasurementPoint) => {
-    setMeasurementPoints(prev => {
-      const filtered = prev.filter(p => p.type !== point.type);
-      return [...filtered, point];
-    });
-  }, []);
-  
-  const handlePointUpdate = useCallback((pointId: string, position: [number, number, number]) => {
-    setMeasurementPoints(prev => 
-      prev.map(p => p.id === pointId ? { ...p, position } : p)
-    );
-  }, []);
-  
-  const handlePointRemove = useCallback((pointId: string) => {
-    setMeasurementPoints(prev => prev.filter(p => p.id !== pointId));
-  }, []);
-  
-  const calculateFromPoints = async () => {
-    try {
-      setError("");
-      setSuccess("");
-      
-      const requiredTypes: PointType[] = [
-        "calibration1", "calibration2",
-        "axis_start", "axis_end",
-        "length_start", "length_end",
-        "width_left", "width_right"
-      ];
-      
-      const missingTypes = requiredTypes.filter(
-        type => !measurementPoints.find(p => p.type === type)
-      );
-      
-      if (missingTypes.length > 0) {
-        setError(`Не хватает точек: ${missingTypes.map(t => t.replace("_", " ")).join(", ")}`);
-        return;
-      }
-      
-      const getPoint = (type: PointType) => {
-        const point = measurementPoints.find(p => p.type === type);
+    @staticmethod
+    def calculate_measurements(
+        axis_start: Point3D,
+        axis_end: Point3D,
+        length_start: Point3D,
+        length_end: Point3D,
+        width_left: Point3D,
+        width_right: Point3D,
+        scale_factor: float
+    ) -> Dict[str, Any]:
+        """Расчет длины и ширины согласно Методу №6"""
+        
+        # Преобразование в numpy массивы
+        axis_start_np = np.array([axis_start.x, axis_start.y, axis_start.z])
+        axis_end_np = np.array([axis_end.x, axis_end.y, axis_end.z])
+        length_start_np = np.array([length_start.x, length_start.y, length_start.z])
+        length_end_np = np.array([length_end.x, length_end.y, length_end.z])
+        width_left_np = np.array([width_left.x, width_left.y, width_left.z])
+        width_right_np = np.array([width_right.x, width_right.y, width_right.z])
+        
+        # 1. Построение оси
+        axis_vector = axis_end_np - axis_start_np
+        axis_length = np.linalg.norm(axis_vector)
+        
+        if axis_length == 0:
+            raise ValueError("Точки оси совпадают")
+        
+        axis_direction = axis_vector / axis_length
+        logger.info(f"Ось: длина={axis_length:.4f}, направление={axis_direction}")
+        
+        # 2. Расчет длины (проекция на ось)
+        # Проецируем точки на ось
+        length_start_proj = np.dot(length_start_np - axis_start_np, axis_direction)
+        length_end_proj = np.dot(length_end_np - axis_start_np, axis_direction)
+        
+        # Длина = абсолютная разница проекций
+        raw_length = abs(length_end_proj - length_start_proj)
+        logger.info(f"Длина: проекции [{length_start_proj:.4f}, {length_end_proj:.4f}], raw={raw_length:.4f}")
+        
+        # 3. Расчет ширины
+        width_vector = width_right_np - width_left_np
+        raw_width = np.linalg.norm(width_vector)
+        logger.info(f"Ширина: vector={width_vector}, raw={raw_width:.4f}")
+        
+        # 4. Расчет угла ширины относительно оси
+        width_angle_degrees = 0.0
+        if raw_width > 0:
+            width_direction = width_vector / raw_width
+            angle_cos = np.dot(width_direction, axis_direction)
+            angle_cos = np.clip(angle_cos, -1.0, 1.0)
+            angle_rad = math.acos(angle_cos)
+            width_angle_degrees = math.degrees(angle_rad)
+        
+        # Отклонение от перпендикуляра (90 градусов)
+        perpendicular_deviation = abs(90.0 - width_angle_degrees)
+        logger.info(f"Угол ширины: {width_angle_degrees:.2f}°, отклонение: {perpendicular_deviation:.2f}°")
+        
+        # 5. Применение масштаба
+        final_length_mm = raw_length * scale_factor
+        final_width_mm = raw_width * scale_factor
+        final_total_mm = final_length_mm + final_width_mm
+        
+        logger.info(f"Результат: длина={final_length_mm:.2f}мм, ширина={final_width_mm:.2f}мм, итого={final_total_mm:.2f}мм")
+        
         return {
-          x: point!.position[0],
-          y: point!.position[1],
-          z: point!.position[2]
-        };
-      };
-      
-      const data = {
-        calibration: {
-          point1: getPoint("calibration1"),
-          point2: getPoint("calibration2"),
-          actual_distance_mm: calibrationDistance
-        },
-        axis: {
-          axis_start: getPoint("axis_start"),
-          axis_end: getPoint("axis_end")
-        },
-        length_start: getPoint("length_start"),
-        length_end: getPoint("length_end"),
-        width_left: getPoint("width_left"),
-        width_right: getPoint("width_right")
-      };
-      
-      const response = await axios.post(`${API_URL}/api/measurements/calculate`, data);
-      setMeasurementResult(response.data);
-      setSuccess("Измерения рассчитаны успешно");
-      
-    } catch (error) {
-      setError("Ошибка при расчете измерений");
-      console.error(error);
-    }
-  };
-  
-  const formatFileSize = (bytes: number): string => {
-    if (bytes === 0) return "0 Bytes";
-    const k = 1024;
-    const sizes = ["Bytes", "KB", "MB", "GB"];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
-  };
-  
-  const PointSelectionPanel = () => (
-    <Paper sx={{ p: 2, mb: 2 }}>
-      <Typography variant="subtitle1" gutterBottom>
-        Выбор точек измерения
-      </Typography>
-      
-      <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-        <Button size="small" variant={activePointType === "calibration1" ? "contained" : "outlined"} color="secondary" onClick={() => setActivePointType("calibration1")}>Калибровка 1</Button>
-        <Button size="small" variant={activePointType === "calibration2" ? "contained" : "outlined"} color="secondary" onClick={() => setActivePointType("calibration2")}>Калибровка 2</Button>
-        <Button size="small" variant={activePointType === "axis_start" ? "contained" : "outlined"} color="primary" onClick={() => setActivePointType("axis_start")}>Начало оси</Button>
-        <Button size="small" variant={activePointType === "axis_end" ? "contained" : "outlined"} color="primary" onClick={() => setActivePointType("axis_end")}>Конец оси</Button>
-        <Button size="small" variant={activePointType === "length_start" ? "contained" : "outlined"} color="success" onClick={() => setActivePointType("length_start")}>Начало длины</Button>
-        <Button size="small" variant={activePointType === "length_end" ? "contained" : "outlined"} color="success" onClick={() => setActivePointType("length_end")}>Конец длины</Button>
-        <Button size="small" variant={activePointType === "width_left" ? "contained" : "outlined"} color="warning" onClick={() => setActivePointType("width_left")}>Левая ширина</Button>
-        <Button size="small" variant={activePointType === "width_right" ? "contained" : "outlined"} color="warning" onClick={() => setActivePointType("width_right")}>Правая ширина</Button>
-      </Stack>
-      
-      {activePointType && (
-        <Alert severity="info" sx={{ mt: 2 }}>
-          Кликните на 3D модели для установки точки: {activePointType.replace("_", " ")}
-        </Alert>
-      )}
-    </Paper>
-  );
-  
-  return (
-    <Box sx={{ flexGrow: 1, bgcolor: "#f5f5f5", minHeight: "100vh" }}>
-      <AppBar position="static">
-        <Toolbar>
-          <Typography variant="h6" component="div" sx={{ flexGrow: 1 }}>
-            🦌 Trophy Measurement System
-          </Typography>
-          <Chip label="Метод №6" color="secondary" />
-        </Toolbar>
-      </AppBar>
-      
-      <Container maxWidth="xl" sx={{ mt: 4, mb: 4 }}>
-        {error && (
-          <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError("")}>
-            {error}
-          </Alert>
-        )}
-        
-        {success && (
-          <Alert severity="success" sx={{ mb: 2 }} onClose={() => setSuccess("")}>
-            {success}
-          </Alert>
-        )}
-        
-        <Tabs value={activeTab} onChange={(e, v) => setActiveTab(v)} sx={{ mb: 2 }}>
-          <Tab label="Трофеи и модели" />
-          <Tab label="3D Viewer" />
-          <Tab label="Измерения" />
-        </Tabs>
-        
-        {activeTab === 0 && (
-          <Grid container spacing={3}>
-            <Grid item xs={12} md={6}>
-              <Card>
-                <CardContent>
-                  <Typography variant="h6" gutterBottom>
-                    Создание нового трофея
-                  </Typography>
-                  
-                  <TextField fullWidth label="Вид животного" value={animalSpecies} onChange={(e) => setAnimalSpecies(e.target.value)} margin="normal" placeholder="Например: Canis lupus" />
-                  <TextField fullWidth label="Дата добычи" type="date" value={huntDate} onChange={(e) => setHuntDate(e.target.value)} margin="normal" InputLabelProps={{ shrink: true }} />
-                  <TextField fullWidth label="Место добычи" value={huntLocation} onChange={(e) => setHuntLocation(e.target.value)} margin="normal" />
-                  <TextField fullWidth label="Владелец" value={ownerName} onChange={(e) => setOwnerName(e.target.value)} margin="normal" />
-                  
-                  <Button variant="contained" color="primary" onClick={createTrophy} sx={{ mt: 2 }} fullWidth>
-                    Создать трофей
-                  </Button>
-                </CardContent>
-              </Card>
-              
-              <Card sx={{ mt: 2 }}>
-                <CardContent>
-                  <Typography variant="h6" gutterBottom>
-                    Список трофеев ({trophies.length})
-                  </Typography>
-                  
-                  <List>
-                    {trophies.length === 0 ? (
-                      <Typography variant="body2" color="textSecondary">
-                        Нет созданных трофеев
-                      </Typography>
-                    ) : (
-                      trophies.map((trophy) => (
-                        <React.Fragment key={trophy.id}>
-                          <ListItem 
-                            button 
-                            onClick={() => {
-                              setSelectedTrophy(trophy);
-                              if (trophy.models.length > 0) {
-                                setCurrentModelUrl(`${API_URL}/api/models/${trophy.id}/${trophy.models[0].filename}`);
-                              }
-                            }}
-                            selected={selectedTrophy?.id === trophy.id}
-                          >
-                            <ListItemText
-                              primary={trophy.animal_species}
-                              secondary={`${trophy.hunt_date} - ${trophy.hunt_location} (${trophy.models.length} моделей)`}
-                            />
-                            <Chip label={trophy.status} size="small" />
-                          </ListItem>
-                          <Divider />
-                        </React.Fragment>
-                      ))
-                    )}
-                  </List>
-                </CardContent>
-              </Card>
-            </Grid>
-            
-            <Grid item xs={12} md={6}>
-              {selectedTrophy && (
-                <Card>
-                  <CardContent>
-                    <Typography variant="h6" gutterBottom>
-                      Загрузка 3D-модели
-                    </Typography>
-                    
-                    <Typography variant="body2" color="textSecondary" sx={{ mb: 2 }}>
-                      Выбран трофей: {selectedTrophy.animal_species}
-                    </Typography>
-                    
-                    <input ref={fileInputRef} type="file" accept=".stl" onChange={handleFileUpload} style={{ display: "none" }} id="stl-upload" />
-                    
-                    <label htmlFor="stl-upload">
-                      <Button variant="contained" component="span" startIcon={<CloudUploadIcon />} disabled={uploading} fullWidth>
-                        {uploading ? "Загрузка..." : "Выбрать STL файл"}
-                      </Button>
-                    </label>
-                    
-                    {uploading && (
-                      <Box sx={{ mt: 2 }}>
-                        <LinearProgress variant="determinate" value={uploadProgress} />
-                        <Typography variant="body2" sx={{ mt: 1 }}>
-                          Загрузка: {uploadProgress}%
-                        </Typography>
-                      </Box>
-                    )}
-                    
-                    {selectedTrophy.models.length > 0 && (
-                      <Box sx={{ mt: 2 }}>
-                        <Typography variant="subtitle1" gutterBottom>
-                          Загруженные модели:
-                        </Typography>
-                        <List dense>
-                          {selectedTrophy.models.map((model) => (
-                            <ListItem key={model.id}>
-                              <ListItemText
-                                primary={model.filename}
-                                secondary={`${model.format.toUpperCase()} | ${model.triangles_count} треугольников | ${formatFileSize(model.file_size)}`}
-                              />
-                              <IconButton edge="end" aria-label="view" onClick={() => {
-                                setCurrentModelUrl(`${API_URL}/api/models/${selectedTrophy.id}/${model.filename}`);
-                                setActiveTab(1);
-                              }}>
-                                <ThreeDRotationIcon />
-                              </IconButton>
-                              <IconButton edge="end" aria-label="delete" onClick={() => handleDeleteModel(selectedTrophy.id, model.filename)}>
-                                <DeleteIcon />
-                              </IconButton>
-                            </ListItem>
-                          ))}
-                        </List>
-                      </Box>
-                    )}
-                  </CardContent>
-                </Card>
-              )}
-            </Grid>
-          </Grid>
-        )}
-        
-        {activeTab === 1 && (
-          <Card>
-            <CardContent>
-              <Typography variant="h6" gutterBottom>
-                3D Viewer
-              </Typography>
-              
-              {currentModelUrl ? (
-                <>
-                  <PointSelectionPanel />
-                  <Box sx={{ height: 600, border: "1px solid #ccc", borderRadius: 1 }}>
-                    <ModelViewer
-                      modelUrl={currentModelUrl}
-                      points={measurementPoints}
-                      onPointAdd={handlePointAdd}
-                      onPointUpdate={handlePointUpdate}
-                      onPointRemove={handlePointRemove}
-                      activePointType={activePointType}
-                      onActivePointTypeChange={setActivePointType}
-                    />
-                  </Box>
-                </>
-              ) : (
-                <Alert severity="info">
-                  Загрузите STL модель для просмотра в 3D
-                </Alert>
-              )}
-            </CardContent>
-          </Card>
-        )}
-        
-        {activeTab === 2 && (
-          <Grid container spacing={3}>
-            <Grid item xs={12} md={6}>
-              <Card>
-                <CardContent>
-                  <Typography variant="h6" gutterBottom>
-                    Параметры измерений
-                  </Typography>
-                  
-                  <TextField
-                    fullWidth
-                    label="Калибровочное расстояние (мм)"
-                    type="number"
-                    value={calibrationDistance}
-                    onChange={(e) => setCalibrationDistance(Number(e.target.value))}
-                    margin="normal"
-                  />
-                  
-                  <Button
-                    variant="contained"
-                    color="primary"
-                    onClick={calculateFromPoints}
-                    sx={{ mt: 2 }}
-                    fullWidth
-                    startIcon={<StraightenIcon />}
-                  >
-                    Рассчитать из 3D точек
-                  </Button>
-                  
-                  <Alert severity="info" sx={{ mt: 2 }}>
-                    Точки измерения: {measurementPoints.length}/8
-                  </Alert>
-                </CardContent>
-              </Card>
-            </Grid>
-            
-            <Grid item xs={12} md={6}>
-              {measurementResult && (
-                <Card>
-                  <CardContent>
-                    <Typography variant="h6" gutterBottom>
-                      Результаты измерений
-                    </Typography>
-                    
-                    <Paper elevation={2} sx={{ p: 2, mb: 2 }}>
-                      <Typography variant="body1">
-                        Длина: {measurementResult.final_length_cm.toFixed(2)} см
-                      </Typography>
-                      <Typography variant="body1">
-                        Ширина: {measurementResult.final_width_cm.toFixed(2)} см
-                      </Typography>
-                      <Typography variant="h6" sx={{ mt: 1 }}>
-                        Итого: {measurementResult.final_total_cm.toFixed(2)} см
-                      </Typography>
-                    </Paper>
-                    
-                    <Typography variant="body2" color="textSecondary">
-                      Масштабный коэффициент: {measurementResult.scale_factor.toFixed(4)}
-                    </Typography>
-                    <Typography variant="body2" color="textSecondary">
-                      Отклонение от перпендикуляра: {measurementResult.perpendicular_deviation_degrees.toFixed(1)}°
-                    </Typography>
-                    
-                    {measurementResult.is_width_perpendicular ? (
-                      <Alert severity="success" sx={{ mt: 2 }}>
-                        ✓ Ширина перпендикулярна оси
-                      </Alert>
-                    ) : (
-                      <Alert severity="warning" sx={{ mt: 2 }}>
-                        ⚠ Отклонение от перпендикуляра превышает 5°
-                      </Alert>
-                    )}
-                  </CardContent>
-                </Card>
-              )}
-            </Grid>
-          </Grid>
-        )}
-      </Container>
-    </Box>
-  );
-}
+            "raw_length": float(raw_length),
+            "raw_width": float(raw_width),
+            "raw_length_mm": float(raw_length),
+            "raw_width_mm": float(raw_width),
+            "final_length_mm": float(final_length_mm),
+            "final_width_mm": float(final_width_mm),
+            "final_total_mm": float(final_total_mm),
+            "final_length_cm": float(final_length_mm / 10),
+            "final_width_cm": float(final_width_mm / 10),
+            "final_total_cm": float(final_total_mm / 10),
+            "width_angle_degrees": float(width_angle_degrees),
+            "perpendicular_deviation_degrees": float(perpendicular_deviation),
+            "is_width_perpendicular": perpendicular_deviation <= MeasurementService.WIDTH_TOLERANCE_DEGREES,
+            "axis_direction": {
+                "x": float(axis_direction[0]),
+                "y": float(axis_direction[1]),
+                "z": float(axis_direction[2])
+            },
+            "axis_length": float(axis_length),
+            "scale_factor": float(scale_factor)
+        }
 
-export default App;
+def parse_stl_info(file_path: Path) -> Dict[str, Any]:
+    """Извлечение информации из STL файла"""
+    info = {
+        "format": "unknown",
+        "vertices_count": 0,
+        "triangles_count": 0,
+        "bounding_box": None,
+        "dimensions": None,
+        "file_size": file_path.stat().st_size
+    }
+    
+    try:
+        with open(file_path, "rb") as f:
+            # Проверка на бинарный формат
+            f.seek(80)
+            triangle_count_bytes = f.read(4)
+            if len(triangle_count_bytes) == 4:
+                triangle_count = int.from_bytes(triangle_count_bytes, "little")
+                expected_size = 84 + triangle_count * 50
+                
+                if file_path.stat().st_size == expected_size:
+                    info["format"] = "binary"
+                    info["triangles_count"] = triangle_count
+                    info["vertices_count"] = triangle_count * 3
+                    
+                    # Читаем все вершины
+                    f.seek(84)
+                    vertices = []
+                    for _ in range(triangle_count):
+                        f.read(12)  # Нормаль
+                        for _ in range(3):
+                            vertex = np.frombuffer(f.read(12), dtype=np.float32)
+                            vertices.append(vertex)
+                        f.read(2)  # Атрибут
+                    
+                    if vertices:
+                        vertices_array = np.array(vertices)
+                        info["bounding_box"] = {
+                            "min": {"x": float(vertices_array[:, 0].min()), 
+                                   "y": float(vertices_array[:, 1].min()), 
+                                   "z": float(vertices_array[:, 2].min())},
+                            "max": {"x": float(vertices_array[:, 0].max()), 
+                                   "y": float(vertices_array[:, 1].max()), 
+                                   "z": float(vertices_array[:, 2].max())}
+                        }
+                        info["dimensions"] = {
+                            "x": float(vertices_array[:, 0].max() - vertices_array[:, 0].min()),
+                            "y": float(vertices_array[:, 1].max() - vertices_array[:, 1].min()),
+                            "z": float(vertices_array[:, 2].max() - vertices_array[:, 2].min())
+                        }
+            
+            # ASCII формат
+            if info["format"] == "unknown":
+                f.seek(0)
+                content = f.read(1000).decode("ascii", errors="ignore")
+                if "solid" in content.lower():
+                    info["format"] = "ascii"
+                    f.seek(0)
+                    full_content = f.read().decode("ascii", errors="ignore")
+                    triangle_count = full_content.lower().count("facet normal")
+                    info["triangles_count"] = triangle_count
+                    info["vertices_count"] = triangle_count * 3
+    
+    except Exception as e:
+        logger.error(f"Ошибка парсинга STL: {str(e)}")
+    
+    return info
+
+@app.get("/")
+async def root():
+    return {
+        "service": "Trophy Measurement API",
+        "version": "0.3.0",
+        "method": "Метод №6 - Измерение черепов плотоядных",
+        "status": "running"
+    }
+
+@app.get("/health")
+async def health_check():
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "trophies_count": len(TROPHIES),
+        "measurements_count": len(MEASUREMENTS)
+    }
+
+@app.post("/api/trophies")
+async def create_trophy(trophy: TrophyCreate):
+    trophy_id = str(uuid.uuid4())
+    trophy_data = {
+        "id": trophy_id,
+        "animal_species": trophy.animal_species,
+        "hunt_date": trophy.hunt_date,
+        "hunt_location": trophy.hunt_location,
+        "owner_name": trophy.owner_name,
+        "status": "DRAFT",
+        "additional_data": trophy.additional_data,
+        "models": [],
+        "created_at": datetime.now().isoformat()
+    }
+    TROPHIES[trophy_id] = trophy_data
+    logger.info(f"Создан трофей: {trophy_id} ({trophy.animal_species})")
+    return trophy_data
+
+@app.get("/api/trophies")
+async def list_trophies():
+    return list(TROPHIES.values())
+
+@app.get("/api/trophies/{trophy_id}")
+async def get_trophy(trophy_id: str):
+    if trophy_id not in TROPHIES:
+        raise HTTPException(404, "Трофей не найден")
+    return TROPHIES[trophy_id]
+
+@app.post("/api/trophies/{trophy_id}/upload-model")
+async def upload_model(trophy_id: str, file: UploadFile = File(...)):
+    if trophy_id not in TROPHIES:
+        raise HTTPException(404, "Трофей не найден")
+    
+    if not file.filename.lower().endswith(".stl"):
+        raise HTTPException(400, "Поддерживается только формат STL")
+    
+    content = await file.read()
+    
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(400, f"Файл слишком большой. Максимальный размер: {MAX_FILE_SIZE // (1024*1024)} MB")
+    
+    trophy_dir = UPLOAD_DIR / trophy_id
+    trophy_dir.mkdir(exist_ok=True)
+    
+    file_path = trophy_dir / file.filename
+    with open(file_path, "wb") as f:
+        f.write(content)
+    
+    stl_info = parse_stl_info(file_path)
+    
+    model_id = str(uuid.uuid4())
+    model_info = {
+        "id": model_id,
+        "filename": file.filename,
+        "file_path": str(file_path),
+        "file_size": len(content),
+        "format": stl_info["format"],
+        "vertices_count": stl_info["vertices_count"],
+        "triangles_count": stl_info["triangles_count"],
+        "bounding_box": stl_info["bounding_box"],
+        "dimensions": stl_info["dimensions"],
+        "uploaded_at": datetime.now().isoformat(),
+        "status": "uploaded"
+    }
+    
+    TROPHIES[trophy_id]["models"].append(model_info)
+    TROPHIES[trophy_id]["status"] = "MODEL_UPLOADED"
+    
+    logger.info(f"Модель загружена: {file.filename}, размеры: {stl_info['dimensions']}")
+    return model_info
+
+@app.get("/api/trophies/{trophy_id}/models")
+async def list_models(trophy_id: str):
+    if trophy_id not in TROPHIES:
+        raise HTTPException(404, "Трофей не найден")
+    return TROPHIES[trophy_id]["models"]
+
+@app.get("/api/models/{trophy_id}/{filename}")
+async def download_model(trophy_id: str, filename: str):
+    file_path = UPLOAD_DIR / trophy_id / filename
+    if not file_path.exists():
+        raise HTTPException(404, "Файл не найден")
+    return FileResponse(
+        path=str(file_path),
+        filename=filename,
+        media_type="application/sla"
+    )
+
+@app.delete("/api/models/{trophy_id}/{filename}")
+async def delete_model(trophy_id: str, filename: str):
+    if trophy_id not in TROPHIES:
+        raise HTTPException(404, "Трофей не найден")
+    
+    file_path = UPLOAD_DIR / trophy_id / filename
+    if file_path.exists():
+        file_path.unlink()
+        TROPHIES[trophy_id]["models"] = [
+            m for m in TROPHIES[trophy_id]["models"] 
+            if m["filename"] != filename
+        ]
+        if not TROPHIES[trophy_id]["models"]:
+            TROPHIES[trophy_id]["status"] = "DRAFT"
+        return {"status": "deleted", "filename": filename}
+    
+    raise HTTPException(404, "Файл не найден")
+
+@app.post("/api/measurements/calculate")
+async def calculate_measurement(data: MeasurementRequest):
+    try:
+        service = MeasurementService()
+        
+        # Логирование входных данных
+        logger.info(f"=== Новый расчет ===")
+        logger.info(f"Калибровка: P1({data.calibration.point1.x}, {data.calibration.point1.y}, {data.calibration.point1.z}), "
+                   f"P2({data.calibration.point2.x}, {data.calibration.point2.y}, {data.calibration.point2.z}), "
+                   f"дистанция={data.calibration.actual_distance_mm}мм")
+        
+        # Расчет масштаба
+        scale_factor = service.calculate_scale_factor(
+            data.calibration.point1,
+            data.calibration.point2,
+            data.calibration.actual_distance_mm
+        )
+        
+        # Расчет измерений
+        result = service.calculate_measurements(
+            data.axis.axis_start,
+            data.axis.axis_end,
+            data.length_start,
+            data.length_end,
+            data.width_left,
+            data.width_right,
+            scale_factor
+        )
+        
+        # Добавление метаданных
+        measurement_id = str(uuid.uuid4())
+        result["measurement_id"] = measurement_id
+        result["algorithm_version"] = service.ALGORITHM_VERSION
+        result["timestamp"] = datetime.now().isoformat()
+        
+        # Сохранение
+        MEASUREMENTS[measurement_id] = result
+        
+        return result
+        
+    except ValueError as e:
+        logger.error(f"Ошибка валидации: {str(e)}")
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        logger.error(f"Ошибка расчета: {str(e)}")
+        raise HTTPException(500, f"Ошибка расчета: {str(e)}")
+
+@app.get("/api/measurements")
+async def list_measurements():
+    return list(MEASUREMENTS.values())
+
+@app.get("/api/measurements/{measurement_id}")
+async def get_measurement(measurement_id: str):
+    if measurement_id not in MEASUREMENTS:
+        raise HTTPException(404, "Измерение не найдено")
+    return MEASUREMENTS[measurement_id]
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
 EOF
 
-echo "✅ App.tsx исправлен для IP 93.77.162.57"
+echo "✅ Backend обновлен с исправленным расчетом"
 
