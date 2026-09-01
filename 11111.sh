@@ -1,3 +1,8 @@
+#!/bin/bash
+# fix_app.sh - Исправление App.tsx
+
+# Создаем правильный App.tsx
+cat > frontend/src/App.tsx << 'EOF'
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
   Container, Typography, Button, TextField, Card, CardContent,
@@ -557,3 +562,7 @@ function App() {
 }
 
 export default App;
+EOF
+
+echo "✅ App.tsx исправлен"
+
