@@ -11,7 +11,11 @@ import StraightenIcon from "@mui/icons-material/Straighten";
 import axios from "axios";
 import ModelViewer, { MeasurementPoint, PointType } from "./components/ModelViewer";
 
-const API_URL = "http://localhost:8000";
+// Используем IP-адрес сервера
+const API_URL = "http://93.77.162.57:8000";
+
+// Или можно автоматически определить хост
+// const API_URL = window.location.protocol + "//" + window.location.hostname + ":8000";
 
 interface Trophy {
   id: string;
@@ -68,6 +72,7 @@ function App() {
   const [calibrationDistance, setCalibrationDistance] = useState<number>(100);
   
   useEffect(() => {
+    console.log("API URL:", API_URL);
     loadTrophies();
   }, []);
   
@@ -77,8 +82,12 @@ function App() {
       setTrophies(response.data);
     } catch (error) {
       console.error("Ошибка загрузки трофеев:", error);
-      if (axios.isAxiosError(error) && error.code === "ERR_NETWORK") {
-        setError("Не удается подключиться к серверу. Проверьте, что backend запущен.");
+      if (axios.isAxiosError(error)) {
+        if (error.code === "ERR_NETWORK") {
+          setError(`Не удается подключиться к серверу ${API_URL}. Проверьте, что backend запущен.`);
+        } else if (error.response?.status === 404) {
+          setError("API endpoint не найден");
+        }
       }
     }
   };
