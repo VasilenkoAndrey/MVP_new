@@ -1,3 +1,5 @@
+# Создать обновленный App.tsx с правильным API URL
+sudo docker-compose exec frontend sh -c 'cat > /app/src/App.tsx << EOF
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
   Container, Typography, Button, TextField, Card, CardContent,
@@ -11,7 +13,10 @@ import StraightenIcon from "@mui/icons-material/Straighten";
 import axios from "axios";
 import ModelViewer, { MeasurementPoint, PointType } from "./components/ModelViewer";
 
-const API_URL = "http://localhost:8000";
+// Используем относительный URL или window.location
+const API_URL = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
+  ? "http://localhost:8000"
+  : "http://" + window.location.hostname + ":8000";
 
 interface Trophy {
   id: string;
@@ -73,10 +78,16 @@ function App() {
   
   const loadTrophies = async () => {
     try {
-      const response = await axios.get(`${API_URL}/api/trophies`);
+      console.log("Loading trophies from:", API_URL);
+      const response = await axios.get(\`\${API_URL}/api/trophies\`);
       setTrophies(response.data);
     } catch (error) {
       console.error("Ошибка загрузки трофеев:", error);
+      if (axios.isAxiosError(error)) {
+        if (error.code === "ERR_NETWORK") {
+          setError("Не удается подключиться к серверу. Проверьте, что backend запущен.");
+        }
+      }
     }
   };
   
@@ -90,14 +101,14 @@ function App() {
         return;
       }
       
-      const response = await axios.post(`${API_URL}/api/trophies`, {
+      const response = await axios.post(\`\${API_URL}/api/trophies\`, {
         animal_species: animalSpecies,
         hunt_date: huntDate,
         hunt_location: huntLocation,
         owner_name: ownerName
       });
       
-      setSuccess(`Трофей создан: ${response.data.animal_species}`);
+      setSuccess(\`Трофей создан: \${response.data.animal_species}\`);
       setAnimalSpecies("");
       setHuntDate("");
       setHuntLocation("");
@@ -139,7 +150,7 @@ function App() {
     
     try {
       const response = await axios.post(
-        `${API_URL}/api/trophies/${selectedTrophy.id}/upload-model`,
+        \`\${API_URL}/api/trophies/\${selectedTrophy.id}/upload-model\`,
         formData,
         {
           headers: { "Content-Type": "multipart/form-data" },
@@ -152,9 +163,9 @@ function App() {
         }
       );
       
-      setSuccess(`Модель "${response.data.filename}" загружена успешно`);
+      setSuccess(\`Модель "\${response.data.filename}" загружена успешно\`);
       loadTrophies();
-      setCurrentModelUrl(`${API_URL}/api/models/${selectedTrophy.id}/${response.data.filename}`);
+      setCurrentModelUrl(\`\${API_URL}/api/models/\${selectedTrophy.id}/\${response.data.filename}\`);
       setActiveTab(1);
       
     } catch (error) {
@@ -171,8 +182,8 @@ function App() {
   
   const handleDeleteModel = async (trophyId: string, filename: string) => {
     try {
-      await axios.delete(`${API_URL}/api/models/${trophyId}/${filename}`);
-      setSuccess(`Модель "${filename}" удалена`);
+      await axios.delete(\`\${API_URL}/api/models/\${trophyId}/\${filename}\`);
+      setSuccess(\`Модель "\${filename}" удалена\`);
       loadTrophies();
       setCurrentModelUrl("");
       setMeasurementPoints([]);
@@ -216,7 +227,7 @@ function App() {
       );
       
       if (missingTypes.length > 0) {
-        setError(`Не хватает точек: ${missingTypes.map(t => t.replace("_", " ")).join(", ")}`);
+        setError(\`Не хватает точек: \${missingTypes.map(t => t.replace("_", " ")).join(", ")}\`);
         return;
       }
       
@@ -245,7 +256,7 @@ function App() {
         width_right: getPoint("width_right")
       };
       
-      const response = await axios.post(`${API_URL}/api/measurements/calculate`, data);
+      const response = await axios.post(\`\${API_URL}/api/measurements/calculate\`, data);
       setMeasurementResult(response.data);
       setSuccess("Измерения рассчитаны успешно");
       
@@ -357,14 +368,14 @@ function App() {
                             onClick={() => {
                               setSelectedTrophy(trophy);
                               if (trophy.models.length > 0) {
-                                setCurrentModelUrl(`${API_URL}/api/models/${trophy.id}/${trophy.models[0].filename}`);
+                                setCurrentModelUrl(\`\${API_URL}/api/models/\${trophy.id}/\${trophy.models[0].filename}\`);
                               }
                             }}
                             selected={selectedTrophy?.id === trophy.id}
                           >
                             <ListItemText
                               primary={trophy.animal_species}
-                              secondary={`${trophy.hunt_date} - ${trophy.hunt_location} (${trophy.models.length} моделей)`}
+                              secondary={\`\${trophy.hunt_date} - \${trophy.hunt_location} (\${trophy.models.length} моделей)\`}
                             />
                             <Chip label={trophy.status} size="small" />
                           </ListItem>
@@ -416,10 +427,10 @@ function App() {
                             <ListItem key={model.id}>
                               <ListItemText
                                 primary={model.filename}
-                                secondary={`${model.format.toUpperCase()} | ${model.triangles_count} треугольников | ${formatFileSize(model.file_size)}`}
+                                secondary={\`\${model.format.toUpperCase()} | \${model.triangles_count} треугольников | \${formatFileSize(model.file_size)}\`}
                               />
                               <IconButton edge="end" aria-label="view" onClick={() => {
-                                setCurrentModelUrl(`${API_URL}/api/models/${selectedTrophy.id}/${model.filename}`);
+                                setCurrentModelUrl(\`\${API_URL}/api/models/\${selectedTrophy.id}/\${model.filename}\`);
                                 setActiveTab(1);
                               }}>
                                 <ThreeDRotationIcon />
@@ -554,4 +565,4 @@ function App() {
 }
 
 export default App;
-
+EOF'
